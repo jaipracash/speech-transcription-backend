@@ -1,11 +1,11 @@
 import json
 import asyncio
 import os
+import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from vosk import Model, KaldiRecognizer
 from googletrans import Translator
-import logging
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -24,36 +24,52 @@ app.add_middleware(
 
 translator = Translator()
 
-
 # Path to Vosk model
 MODEL_PATH = "model"
 
+# --- Model Download Logic for Hugging Face ---
 if not os.path.exists(MODEL_PATH):
-    logger.error(f"Model path '{MODEL_PATH}' does not exist. Please download the Vosk model and place it in the 'backend/model' directory.")
-    model = None
-else:
+    logger.info("Model not found. Downloading small English model...")
+    try:
+        # Using a reliable mirror for the small model
+        os.system("wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip")
+        os.system("unzip vosk-model-small-en-us-0.15.zip")
+        os.rename("vosk-model-small-en-us-0.15", MODEL_PATH)
+        os.remove("vosk-model-small-en-us-0.15.zip")
+        logger.info("Model downloaded and extracted successfully.")
+    except Exception as e:
+        logger.error(f"Failed to download model: {e}")
+
+# Load model
+if os.path.exists(MODEL_PATH):
     model = Model(MODEL_PATH)
+else:
+    logger.error("Vosk model could not be loaded.")
+    model = None
+
+@app.get("/")
+def read_root():
+    return {"status": "Vosk Backend Running", "model_loaded": model is not None}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    logger.info("Client connected")
+    logger.info("Client connected via WebSocket")
     
     if model is None:
         await websocket.send_json({"error": "Vosk model not found on server"})
         await websocket.close()
         return
 
-    # Vosk recognizer expects a specific sample rate (16000 is common for small models)
+    # Vosk recognizer (16000 is standard)
     rec = KaldiRecognizer(model, 16000)
-    target_lang = "ta" # Default
+    target_lang = "ta" # Default to Tamil
 
     try:
         while True:
             data = await websocket.receive()
             
             if "text" in data:
-                # Handle configuration messages (like language change)
                 config = json.loads(data["text"])
                 if "target_lang" in config:
                     target_lang = config["target_lang"]
@@ -85,8 +101,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     partial = json.loads(rec.PartialResult())
                     partial_text = partial.get("partial", "")
                     if partial_text:
-                        # We don't always translate partials to save API calls/latency
-                        # but we send the partial original text
                         await websocket.send_json({
                             "original": partial_text,
                             "translated": "",
@@ -97,8 +111,12 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info("Client disconnected")
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
-        await websocket.close()
+        try:
+            await websocket.close()
+        except:
+            pass
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Local test run
+    uvicorn.run(app, host="0.0.0.0", port=7860)
